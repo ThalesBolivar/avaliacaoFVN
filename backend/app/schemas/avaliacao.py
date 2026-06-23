@@ -16,7 +16,6 @@ class SalvarAvaliacaoRequest(BaseModel):
     respostas: List[RespostaInput]
     observacoes: Optional[str] = None
     sugestoes_melhoria: Optional[str] = None
-    uso_alcool_drogas: Optional[bool] = None
 
 
 class FinalizarAvaliacaoRequest(SalvarAvaliacaoRequest):
@@ -73,7 +72,6 @@ class FormularioResumo(BaseModel):
 class FormularioDetalhado(FormularioResumo):
     observacoes: Optional[str]
     sugestoes_melhoria: Optional[str]
-    uso_alcool_drogas: Optional[bool]
     perguntas: List[PerguntaFormularioResponse] = []
     respostas: List[RespostaResponse] = []
 

@@ -3,10 +3,10 @@ import api from './api'
 import type { TokenResponse, AuthUser } from '@/types'
 
 export const authService = {
-  async login(municipio_id: number, email: string, senha: string): Promise<TokenResponse> {
+  async login(municipio_id: number | null, login: string, senha: string): Promise<TokenResponse> {
     const response = await axios.post<TokenResponse>('/api/v1/auth/login', {
       municipio_id,
-      email,
+      login,
       senha,
     })
     return response.data

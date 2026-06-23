@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS usuarios (
     id                       BIGINT PRIMARY KEY AUTO_INCREMENT,
     municipio_id             BIGINT NOT NULL,
     servidor_id              BIGINT NULL,
+    funcao_usuario_id        BIGINT NULL,
     nome                     VARCHAR(150) NOT NULL,
     email                    VARCHAR(150) NOT NULL,
     senha_hash               VARCHAR(255) NOT NULL,
@@ -48,10 +49,17 @@ CREATE TABLE IF NOT EXISTS servidores (
     municipio_id       BIGINT NOT NULL,
     usuario_id         BIGINT NULL,
     chefia_servidor_id BIGINT NULL,
+    matricula_chefia   VARCHAR(50) NULL,
+    nome_chefia        VARCHAR(150) NULL,
     nome               VARCHAR(150) NOT NULL,
     cpf                VARCHAR(14) NULL,
     matricula          VARCHAR(50) NOT NULL,
+    grau_instrucao     VARCHAR(100) NULL,
+    situacao_grau_instrucao VARCHAR(100) NULL,
+    data_nascimento    DATE NULL,
+    vinculo            VARCHAR(100) NULL,
     cargo              VARCHAR(150) NULL,
+    cargo_id           BIGINT NULL,
     lotacao            VARCHAR(150) NULL,
     data_admissao      DATE NULL,
     email              VARCHAR(150) NULL,
@@ -68,6 +76,24 @@ CREATE TABLE IF NOT EXISTS servidores (
 
 ALTER TABLE usuarios
     ADD CONSTRAINT fk_usuarios_servidor FOREIGN KEY (servidor_id) REFERENCES servidores(id);
+
+-- ============================================================
+-- FUNÇÕES DE USUÁRIO
+-- ============================================================
+CREATE TABLE IF NOT EXISTS funcoes_usuario (
+    id            BIGINT PRIMARY KEY AUTO_INCREMENT,
+    municipio_id  BIGINT NOT NULL,
+    nome          VARCHAR(150) NOT NULL,
+    perfil_base   ENUM('ADMINISTRADOR','CHEFIA','SUBCOMISSAO') NOT NULL,
+    ativo         BOOLEAN NOT NULL DEFAULT TRUE,
+    criado_em     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    atualizado_em DATETIME NULL ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_funcoes_usuario_municipio FOREIGN KEY (municipio_id) REFERENCES municipios(id),
+    UNIQUE KEY uk_funcao_usuario_nome_municipio (nome, municipio_id)
+);
+
+ALTER TABLE usuarios
+    ADD CONSTRAINT fk_usuarios_funcao_usuario FOREIGN KEY (funcao_usuario_id) REFERENCES funcoes_usuario(id);
 
 -- ============================================================
 -- CATEGORIAS DE AVALIAÇÃO
@@ -104,6 +130,39 @@ CREATE TABLE IF NOT EXISTS modelos_avaliacao (
     CONSTRAINT fk_modelos_municipio FOREIGN KEY (municipio_id) REFERENCES municipios(id),
     CONSTRAINT fk_modelos_criador FOREIGN KEY (criado_por_id) REFERENCES usuarios(id)
 );
+
+-- ============================================================
+-- CARGOS (CATÁLOGO) + PESOS DE QUESTÃO POR CARGO
+-- Catálogo de cargos do município. servidores.cargo_id aponta para cá.
+-- O campo texto servidores.cargo é mantido só para exibição/compatibilidade.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS cargos (
+    id                     BIGINT PRIMARY KEY AUTO_INCREMENT,
+    municipio_id           BIGINT NOT NULL,
+    nome                   VARCHAR(150) NOT NULL,
+    nivel                  ENUM('FUNDAMENTAL','MEDIO','SUPERIOR','COMISSAO') NOT NULL,
+    modelo_avaliacao_id    BIGINT NULL,
+    pontuacao_maxima       DECIMAL(6,2) NOT NULL DEFAULT 100.00,
+    pontos_min_estagio     DECIMAL(6,2) NULL,
+    pontos_min_progressao  DECIMAL(6,2) NULL,
+    ativo                  BOOLEAN NOT NULL DEFAULT TRUE,
+    criado_em              DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uk_cargos_municipio_nome UNIQUE (municipio_id, nome),
+    CONSTRAINT fk_cargos_municipio FOREIGN KEY (municipio_id) REFERENCES municipios(id),
+    CONSTRAINT fk_cargos_modelo    FOREIGN KEY (modelo_avaliacao_id) REFERENCES modelos_avaliacao(id)
+);
+
+CREATE TABLE IF NOT EXISTS pesos_questao_cargo (
+    id               BIGINT PRIMARY KEY AUTO_INCREMENT,
+    cargo_id         BIGINT NOT NULL,
+    numero_pergunta  INT NOT NULL,
+    peso             DECIMAL(4,2) NOT NULL,
+    CONSTRAINT uk_peso_cargo_questao UNIQUE (cargo_id, numero_pergunta),
+    CONSTRAINT fk_peso_cargo FOREIGN KEY (cargo_id) REFERENCES cargos(id) ON DELETE CASCADE
+);
+
+ALTER TABLE servidores
+    ADD CONSTRAINT fk_servidores_cargo FOREIGN KEY (cargo_id) REFERENCES cargos(id);
 
 -- ============================================================
 -- PERGUNTAS DO QUESTIONÁRIO
@@ -254,6 +313,25 @@ CREATE TABLE IF NOT EXISTS linhas_importacao (
     mensagem_erro      TEXT NULL,
     criado_em          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT fk_linhas_lote FOREIGN KEY (lote_importacao_id) REFERENCES lotes_importacao(id)
+);
+
+-- ============================================================
+-- CHAMADOS (solicitações de cadastro — ex.: cargo/lotação inexistente)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS chamados (
+    id                 BIGINT PRIMARY KEY AUTO_INCREMENT,
+    municipio_id       BIGINT NOT NULL,
+    usuario_id         BIGINT NOT NULL,
+    tipo               ENUM('CARGO','LOTACAO','OUTRO') NOT NULL,
+    valor_solicitado   VARCHAR(255) NOT NULL,
+    descricao          TEXT NULL,
+    status             ENUM('ABERTO','RESOLVIDO','REJEITADO') NOT NULL DEFAULT 'ABERTO',
+    lote_importacao_id BIGINT NULL,
+    criado_em          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    resolvido_em       DATETIME NULL,
+    CONSTRAINT fk_chamados_municipio FOREIGN KEY (municipio_id) REFERENCES municipios(id),
+    CONSTRAINT fk_chamados_usuario   FOREIGN KEY (usuario_id) REFERENCES usuarios(id),
+    CONSTRAINT fk_chamados_lote      FOREIGN KEY (lote_importacao_id) REFERENCES lotes_importacao(id)
 );
 
 -- ============================================================

@@ -15,6 +15,9 @@ from app.models.periodo import (
 from app.models.questionario import ModeloAvaliacao, PerguntaAvaliacao, OpcaoPerguntaAvaliacao
 from app.models.usuario import Usuario, PerfilEnum
 from app.models.servidor import Servidor
+from app.models.servidor_funcao import ServidorFuncao
+from app.models.cargo import PesoQuestaoCargo
+from app.models.notificacao import Notificacao
 from app.schemas.avaliacao import (
     SalvarAvaliacaoRequest, FinalizarAvaliacaoRequest,
     FormularioResumo, FormularioDetalhado,
@@ -56,6 +59,41 @@ async def _sincronizar_status_vinculo(db: AsyncSession, vinculo_id: int) -> None
         vinculo.status = StatusVinculoEnum.PENDENTE
 
 
+TIPO_LABEL = {
+    "AUTOAVALIACAO": "Autoavaliação",
+    "SUPERIOR_IMEDIATO": "Avaliação pela Chefia",
+    "SUBCOMISSAO": "Avaliação pela Subcomissão",
+}
+
+
+async def _notificar(
+    db: AsyncSession,
+    *,
+    municipio_id: int,
+    usuario_id: int,
+    tipo: str,
+    titulo: str,
+    mensagem: str,
+) -> None:
+    db.add(Notificacao(
+        municipio_id=municipio_id,
+        usuario_id=usuario_id,
+        tipo=tipo,
+        titulo=titulo,
+        mensagem=mensagem,
+    ))
+
+
+async def _pesos_por_cargo(db: AsyncSession, cargo_id: int | None) -> dict[int, float]:
+    """Retorna {numero_pergunta: peso} para o cargo do servidor avaliado."""
+    if not cargo_id:
+        return {}
+    result = await db.execute(
+        select(PesoQuestaoCargo).where(PesoQuestaoCargo.cargo_id == cargo_id)
+    )
+    return {p.numero_pergunta: float(p.peso) for p in result.scalars().all()}
+
+
 def _pergunta_aplicavel(pergunta: PerguntaAvaliacao, tipo_avaliacao: TipoAvaliacaoEnum) -> bool:
     if tipo_avaliacao == TipoAvaliacaoEnum.AUTOAVALIACAO:
         return not pergunta.apenas_superior and not pergunta.apenas_subcomissao
@@ -95,7 +133,7 @@ async def avaliacoes_pendentes(
     db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(get_current_user),
 ):
-    result = await db.execute(
+    query = (
         select(FormularioAvaliacao)
         .join(VinculoAvaliacao, VinculoAvaliacao.id == FormularioAvaliacao.vinculo_avaliacao_id)
         .join(PeriodoAvaliacao, PeriodoAvaliacao.id == VinculoAvaliacao.periodo_avaliacao_id)
@@ -108,6 +146,23 @@ async def avaliacoes_pendentes(
         )
         .order_by(FormularioAvaliacao.criado_em)
     )
+
+    # Subcomissão não pode avaliar seus próprios membros
+    if current_user.perfil == PerfilEnum.SUBCOMISSAO and current_user.funcao_usuario_id:
+        membros_result = await db.execute(
+            select(ServidorFuncao.servidor_id).where(
+                ServidorFuncao.funcao_usuario_id == current_user.funcao_usuario_id,
+                ServidorFuncao.ativo == True,
+            )
+        )
+        ids_membros = [row[0] for row in membros_result.all()]
+        if ids_membros:
+            from sqlalchemy import not_
+            query = query.where(
+                FormularioAvaliacao.servidor_avaliado_id.not_in(ids_membros)
+            )
+
+    result = await db.execute(query)
     forms = result.scalars().all()
     items = []
     for f in forms:
@@ -116,6 +171,75 @@ async def avaliacoes_pendentes(
         item.nome_servidor = srv.nome if srv else None
         items.append(item)
     return items
+
+
+@router.get("/recebidas", response_model=List[FormularioResumo])
+async def avaliacoes_recebidas(
+    db: AsyncSession = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user),
+):
+    """Retorna todas as avaliações RECEBIDAS pelo servidor logado (como avaliado)."""
+    if not current_user.servidor_id:
+        return []
+
+    result = await db.execute(
+        select(FormularioAvaliacao)
+        .join(VinculoAvaliacao, VinculoAvaliacao.id == FormularioAvaliacao.vinculo_avaliacao_id)
+        .join(PeriodoAvaliacao, PeriodoAvaliacao.id == VinculoAvaliacao.periodo_avaliacao_id)
+        .where(
+            FormularioAvaliacao.municipio_id == current_user.municipio_id,
+            FormularioAvaliacao.servidor_avaliado_id == current_user.servidor_id,
+            FormularioAvaliacao.ativo == "S",
+            PeriodoAvaliacao.status.in_([StatusPeriodoEnum.ATIVO, StatusPeriodoEnum.ENCERRADO]),
+        )
+        .order_by(FormularioAvaliacao.criado_em.desc())
+    )
+    forms = result.scalars().all()
+    items = []
+    for f in forms:
+        srv = await db.get(Servidor, f.servidor_avaliado_id)
+        item = FormularioResumo.model_validate(f)
+        item.nome_servidor = srv.nome if srv else None
+        items.append(item)
+    return items
+
+
+@router.get("/minha-subcomissao")
+async def membros_minha_subcomissao(
+    db: AsyncSession = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user),
+):
+    if current_user.perfil != PerfilEnum.SUBCOMISSAO:
+        raise HTTPException(status_code=403, detail="Apenas usuários de subcomissão podem acessar este recurso")
+
+    if not current_user.funcao_usuario_id:
+        raise HTTPException(status_code=404, detail="Usuário não está vinculado a nenhuma subcomissão")
+
+    result = await db.execute(
+        select(ServidorFuncao)
+        .options(selectinload(ServidorFuncao.servidor))
+        .where(
+            ServidorFuncao.funcao_usuario_id == current_user.funcao_usuario_id,
+            ServidorFuncao.ativo == True,
+        )
+    )
+    vinculos = result.scalars().all()
+
+    from app.models.funcao_usuario import FuncaoUsuario
+    funcao = await db.get(FuncaoUsuario, current_user.funcao_usuario_id)
+
+    return {
+        "funcao_nome": funcao.nome if funcao else None,
+        "membros": [
+            {
+                "id": v.servidor.id,
+                "nome": v.servidor.nome,
+                "matricula": v.servidor.matricula,
+                "cargo": v.servidor.cargo,
+            }
+            for v in vinculos if v.servidor
+        ],
+    }
 
 
 @router.get("/{formulario_id}", response_model=FormularioDetalhado)
@@ -154,12 +278,24 @@ async def carregar_formulario(
         raise HTTPException(status_code=404, detail="Modelo da avaliação não encontrado")
 
     srv = await db.get(Servidor, formulario.servidor_avaliado_id)
+    pesos = await _pesos_por_cargo(db, srv.cargo_id if srv else None)
+
     resp = FormularioDetalhado.model_validate(formulario)
     resp.nome_servidor = srv.nome if srv else None
-    resp.perguntas = [
-        pergunta for pergunta in modelo.perguntas
-        if pergunta.ativa and _pergunta_aplicavel(pergunta, formulario.tipo_avaliacao)
+
+    perguntas_filtradas = [
+        p for p in modelo.perguntas
+        if p.ativa and _pergunta_aplicavel(p, formulario.tipo_avaliacao)
     ]
+    # Sobrescreve o peso de cada pergunta com o valor de pesos_questao_cargo
+    from app.schemas.avaliacao import PerguntaFormularioResponse
+    perguntas_response = []
+    for p in perguntas_filtradas:
+        pr = PerguntaFormularioResponse.model_validate(p)
+        if p.numero_pergunta in pesos:
+            pr.peso = pesos[p.numero_pergunta]
+        perguntas_response.append(pr)
+    resp.perguntas = perguntas_response
     return resp
 
 
@@ -234,8 +370,7 @@ async def salvar_avaliacao(
         formulario.observacoes = data.observacoes
     if data.sugestoes_melhoria is not None:
         formulario.sugestoes_melhoria = data.sugestoes_melhoria
-    if data.uso_alcool_drogas is not None:
-        formulario.uso_alcool_drogas = data.uso_alcool_drogas
+
 
     for resp in data.respostas:
         existing = await db.execute(
@@ -307,8 +442,10 @@ async def finalizar_avaliacao(
         formulario.observacoes = data.observacoes
     if data.sugestoes_melhoria is not None:
         formulario.sugestoes_melhoria = data.sugestoes_melhoria
-    if data.uso_alcool_drogas is not None:
-        formulario.uso_alcool_drogas = data.uso_alcool_drogas
+
+
+    srv_fin = await db.get(Servidor, formulario.servidor_avaliado_id)
+    pesos_cargo = await _pesos_por_cargo(db, srv_fin.cargo_id if srv_fin else None)
 
     pontuacao_total = 0.0
     for resp in data.respostas:
@@ -323,6 +460,9 @@ async def finalizar_avaliacao(
         pergunta = await db.get(PerguntaAvaliacao, resp.pergunta_avaliacao_id)
         pontuacao = 0.0
 
+        # Usa peso de pesos_questao_cargo se disponível, senão fallback para pergunta.peso
+        peso = float(pesos_cargo.get(pergunta.numero_pergunta, pergunta.peso)) if pergunta else 1.0
+
         if resp.opcao_selecionada and pergunta:
             opcao_result = await db.execute(
                 select(OpcaoPerguntaAvaliacao).where(
@@ -332,10 +472,10 @@ async def finalizar_avaliacao(
             )
             opcao = opcao_result.scalar_one_or_none()
             if opcao and opcao.pontuacao:
-                pontuacao = float(opcao.pontuacao) * float(pergunta.peso)
+                pontuacao = float(opcao.pontuacao) * peso
 
         elif resp.resposta_numerica and pergunta:
-            pontuacao = float(resp.resposta_numerica) * float(pergunta.peso)
+            pontuacao = float(resp.resposta_numerica) * peso
 
         pontuacao_total += pontuacao
 
@@ -366,6 +506,29 @@ async def finalizar_avaliacao(
         descricao=f"Pontuação total: {pontuacao_total:.2f}",
     )
     await _sincronizar_status_vinculo(db, formulario.vinculo_avaliacao_id)
+
+    # Notificar o avaliador que finalizou
+    tipo_label = TIPO_LABEL.get(formulario.tipo_avaliacao.value, "Avaliação")
+    nome_avaliado = srv_fin.nome if srv_fin else f"Servidor #{formulario.servidor_avaliado_id}"
+    await _notificar(
+        db,
+        municipio_id=formulario.municipio_id,
+        usuario_id=current_user.id,
+        tipo="AVALIACAO_FINALIZADA",
+        titulo=f"{tipo_label} finalizada",
+        mensagem=f"Você finalizou a avaliação de {nome_avaliado} com {pontuacao_total:.2f} pontos.",
+    )
+
+    # Notificar o servidor avaliado (se tiver usuário vinculado)
+    if srv_fin and srv_fin.usuario_id:
+        await _notificar(
+            db,
+            municipio_id=formulario.municipio_id,
+            usuario_id=srv_fin.usuario_id,
+            tipo="AVALIACAO_RECEBIDA",
+            titulo="Você foi avaliado",
+            mensagem=f"Uma avaliação foi finalizada para você ({tipo_label}). Consulte 'Avaliações Recebidas'.",
+        )
 
     await db.flush()
     await db.refresh(formulario)

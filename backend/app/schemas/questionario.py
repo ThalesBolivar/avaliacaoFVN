@@ -106,14 +106,24 @@ class PerguntaResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+# ── Funções vinculadas ao modelo ──────────────────────────────
+
+class FuncaoVinculadaResponse(BaseModel):
+    id: int
+    funcao_usuario_id: int
+    nome: str
+    perfil_base: str
+
+    model_config = {"from_attributes": True}
+
+
 # ── Modelos de Avaliação ──────────────────────────────────────
 
 class ModeloCreate(BaseModel):
     nome: str
     descricao: Optional[str] = None
     para_autoavaliacao: bool = True
-    para_superior_imediato: bool = True
-    para_subcomissao: bool = True
+    funcao_ids: List[int] = []
     perguntas: List[PerguntaCreate] = []
 
 
@@ -121,8 +131,7 @@ class ModeloUpdate(BaseModel):
     nome: Optional[str] = None
     descricao: Optional[str] = None
     para_autoavaliacao: Optional[bool] = None
-    para_superior_imediato: Optional[bool] = None
-    para_subcomissao: Optional[bool] = None
+    funcao_ids: Optional[List[int]] = None
     perguntas: Optional[List[PerguntaCreate]] = None
 
 
@@ -139,6 +148,8 @@ class ModeloResumo(BaseModel):
     publicado_em: Optional[datetime]
     criado_em: datetime
     total_perguntas: int = 0
+    funcao_ids: List[int] = []
+    funcoes_vinculadas: List[FuncaoVinculadaResponse] = []
 
     model_config = {"from_attributes": True}
 
@@ -146,5 +157,6 @@ class ModeloResumo(BaseModel):
 class ModeloResponse(ModeloResumo):
     descricao: Optional[str]
     perguntas: List[PerguntaResponse] = []
+    funcoes_vinculadas: List[FuncaoVinculadaResponse] = []
 
     model_config = {"from_attributes": True}

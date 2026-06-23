@@ -10,8 +10,12 @@ from app.database import get_db
 from app.core.deps import get_current_user, require_admin
 from app.core.audit import log_event, Acoes
 from app.core.notificacoes import criar_notificacao
+from app.models.cargo import Cargo
+from app.models.funcao_usuario import FuncaoUsuario
+from app.models.modelo_avaliacao_funcao import ModeloAvaliacaoFuncao
 from app.models.periodo import PeriodoAvaliacao, VinculoAvaliacao, FormularioAvaliacao, StatusPeriodoEnum, TipoAvaliacaoEnum
 from app.models.servidor import Servidor
+from app.models.servidor_funcao import ServidorFuncao
 from app.models.questionario import ModeloAvaliacao, StatusModeloEnum
 from app.models.usuario import Usuario, PerfilEnum
 from app.schemas.periodo import PeriodoCreate, PeriodoUpdate, PeriodoResponse, PeriodoProgresso, VinculoResponse
@@ -72,15 +76,56 @@ async def _buscar_usuario_por_servidor(
     return candidatos[0] if candidatos else None
 
 
-async def _listar_usuarios_subcomissao(db: AsyncSession, municipio_id: int) -> list[Usuario]:
+async def _listar_usuarios_por_funcao_ids(
+    db: AsyncSession, funcao_ids: list[int], municipio_id: int
+) -> list[Usuario]:
+    """Retorna usuários que possuem vínculo ativo com alguma das funcoes_ids informadas."""
+    if not funcao_ids:
+        return []
     result = await db.execute(
-        select(Usuario).where(
-            Usuario.municipio_id == municipio_id,
-            Usuario.perfil == PerfilEnum.SUBCOMISSAO,
+        select(Usuario)
+        .join(Servidor, Servidor.id == Usuario.servidor_id)
+        .join(ServidorFuncao, ServidorFuncao.servidor_id == Servidor.id)
+        .where(
+            ServidorFuncao.municipio_id == municipio_id,
+            ServidorFuncao.ativo == True,
+            ServidorFuncao.funcao_usuario_id.in_(funcao_ids),
             Usuario.ativo == True,
         )
+        .distinct()
     )
     return result.scalars().all()
+
+
+async def _listar_usuarios_subcomissao(db: AsyncSession, municipio_id: int) -> list[Usuario]:
+    # Busca servidores vinculados a funções com perfil_base=SUBCOMISSAO na nova tabela servidor_funcao
+    result = await db.execute(
+        select(Usuario)
+        .join(Servidor, Servidor.id == Usuario.servidor_id)
+        .join(ServidorFuncao, ServidorFuncao.servidor_id == Servidor.id)
+        .join(FuncaoUsuario, FuncaoUsuario.id == ServidorFuncao.funcao_usuario_id)
+        .where(
+            ServidorFuncao.municipio_id == municipio_id,
+            ServidorFuncao.ativo == True,
+            FuncaoUsuario.perfil_base == PerfilEnum.SUBCOMISSAO,
+            Usuario.ativo == True,
+        )
+        .distinct()
+    )
+    usuarios = result.scalars().all()
+
+    # Fallback: mantém compatibilidade com usuários criados manualmente com perfil SUBCOMISSAO
+    if not usuarios:
+        result_legado = await db.execute(
+            select(Usuario).where(
+                Usuario.municipio_id == municipio_id,
+                Usuario.perfil == PerfilEnum.SUBCOMISSAO,
+                Usuario.ativo == True,
+            )
+        )
+        usuarios = result_legado.scalars().all()
+
+    return usuarios
 
 
 async def _criar_formulario_se_necessario(
@@ -126,6 +171,12 @@ async def _gerar_formularios_para_vinculo(
 ) -> list[FormularioAvaliacao]:
     formularios_criados: list[FormularioAvaliacao] = []
 
+    # Determina quais funções estão vinculadas ao modelo
+    funcoes_vinculadas = getattr(modelo, 'funcoes_vinculadas', None) or []
+    funcao_ids_chefia = [fv.funcao_usuario_id for fv in funcoes_vinculadas if fv.funcao.perfil_base == PerfilEnum.CHEFIA]
+    funcao_ids_sub = [fv.funcao_usuario_id for fv in funcoes_vinculadas if fv.funcao.perfil_base == PerfilEnum.SUBCOMISSAO]
+
+    # ── AUTOAVALIAÇÃO ──────────────────────────────────────────────
     if modelo.para_autoavaliacao:
         usuario_servidor = await _buscar_usuario_por_servidor(
             db,
@@ -145,12 +196,14 @@ async def _gerar_formularios_para_vinculo(
             if criado:
                 formularios_criados.append(formulario)
 
-    if modelo.para_superior_imediato:
+    # ── SUPERIOR IMEDIATO (Chefia) ─────────────────────────────────
+    # Usa funcao_ids_chefia para verificar se o modelo tem função de chefia vinculada;
+    # se não tiver (modelos antigos), cai no flag para_superior_imediato
+    if funcao_ids_chefia or (not funcoes_vinculadas and modelo.para_superior_imediato):
         usuario_chefia = await _buscar_usuario_por_servidor(
             db,
             servidor_id=vinculo.chefia_servidor_id,
             municipio_id=vinculo.municipio_id,
-            perfil_preferido=PerfilEnum.CHEFIA,
         )
         if usuario_chefia:
             formulario, criado = await _criar_formulario_se_necessario(
@@ -164,19 +217,27 @@ async def _gerar_formularios_para_vinculo(
             if criado:
                 formularios_criados.append(formulario)
 
-    if modelo.para_subcomissao:
+    # ── SUBCOMISSÃO ────────────────────────────────────────────────
+    # Se o modelo tem funções de subcomissão vinculadas, usa apenas os membros daquelas funções;
+    # caso contrário (modelos antigos), busca todos os membros de subcomissão
+    if funcao_ids_sub:
+        usuarios_subcomissao = await _listar_usuarios_por_funcao_ids(db, funcao_ids_sub, vinculo.municipio_id)
+    elif not funcoes_vinculadas and modelo.para_subcomissao:
         usuarios_subcomissao = await _listar_usuarios_subcomissao(db, vinculo.municipio_id)
-        for usuario_subcomissao in usuarios_subcomissao:
-            formulario, criado = await _criar_formulario_se_necessario(
-                db,
-                vinculo_id=vinculo.id,
-                municipio_id=vinculo.municipio_id,
-                tipo_avaliacao=TipoAvaliacaoEnum.SUBCOMISSAO,
-                usuario_avaliador_id=usuario_subcomissao.id,
-                servidor_avaliado_id=vinculo.servidor_avaliado_id,
-            )
-            if criado:
-                formularios_criados.append(formulario)
+    else:
+        usuarios_subcomissao = []
+
+    for usuario_subcomissao in usuarios_subcomissao:
+        formulario, criado = await _criar_formulario_se_necessario(
+            db,
+            vinculo_id=vinculo.id,
+            municipio_id=vinculo.municipio_id,
+            tipo_avaliacao=TipoAvaliacaoEnum.SUBCOMISSAO,
+            usuario_avaliador_id=usuario_subcomissao.id,
+            servidor_avaliado_id=vinculo.servidor_avaliado_id,
+        )
+        if criado:
+            formularios_criados.append(formulario)
 
     return formularios_criados
 
@@ -317,17 +378,31 @@ async def ativar_periodo(
 
     periodo.status = StatusPeriodoEnum.ATIVO
 
-    if periodo.modelo_avaliacao_id:
-        modelo = await db.get(ModeloAvaliacao, periodo.modelo_avaliacao_id)
-        if modelo:
-            vinculos_result = await db.execute(
-                select(VinculoAvaliacao).where(
-                    VinculoAvaliacao.periodo_avaliacao_id == periodo_id,
-                    VinculoAvaliacao.municipio_id == current_user.municipio_id,
+    vinculos_result = await db.execute(
+        select(VinculoAvaliacao).where(
+            VinculoAvaliacao.periodo_avaliacao_id == periodo_id,
+            VinculoAvaliacao.municipio_id == current_user.municipio_id,
+        )
+    )
+    vinculos = vinculos_result.scalars().all()
+    if vinculos:
+        modelos_cache_ativacao: dict[int, ModeloAvaliacao] = {}
+        for vinculo in vinculos:
+            mid = vinculo.modelo_avaliacao_id or periodo.modelo_avaliacao_id
+            if not mid:
+                continue
+            if mid not in modelos_cache_ativacao:
+                m_result = await db.execute(
+                    select(ModeloAvaliacao)
+                    .options(selectinload(ModeloAvaliacao.funcoes_vinculadas).selectinload(ModeloAvaliacaoFuncao.funcao))
+                    .where(ModeloAvaliacao.id == mid)
                 )
-            )
-            for vinculo in vinculos_result.scalars().all():
-                await _gerar_formularios_para_vinculo(db, vinculo=vinculo, modelo=modelo)
+                m = m_result.scalar_one_or_none()
+                if m:
+                    modelos_cache_ativacao[mid] = m
+            m_vinculo = modelos_cache_ativacao.get(mid)
+            if m_vinculo:
+                await _gerar_formularios_para_vinculo(db, vinculo=vinculo, modelo=m_vinculo)
 
     formularios_result = await db.execute(
         select(FormularioAvaliacao)
@@ -401,22 +476,60 @@ async def gerar_vinculos(
     if not periodo.modelo_avaliacao_id:
         raise HTTPException(status_code=400, detail="Período precisa ter um modelo de avaliação")
 
-    modelo = await db.get(ModeloAvaliacao, periodo.modelo_avaliacao_id)
+    modelo_q = await db.execute(
+        select(ModeloAvaliacao)
+        .options(selectinload(ModeloAvaliacao.funcoes_vinculadas).selectinload(ModeloAvaliacaoFuncao.funcao))
+        .where(ModeloAvaliacao.id == periodo.modelo_avaliacao_id)
+    )
+    modelo = modelo_q.scalar_one_or_none()
     if not modelo or modelo.municipio_id != current_user.municipio_id:
         raise HTTPException(status_code=400, detail="Modelo de avaliação inválido para este município")
 
     servidores_result = await db.execute(
-        select(Servidor).where(
+        select(Servidor)
+        .options(selectinload(Servidor.cargo_catalogo))
+        .where(
             Servidor.municipio_id == current_user.municipio_id,
             Servidor.ativo == True,
         )
     )
     servidores = servidores_result.scalars().all()
 
+    # Cache de modelos carregados para não repetir queries
+    modelos_cache: dict[int, ModeloAvaliacao] = {}
+    if modelo:
+        modelos_cache[modelo.id] = modelo
+
+    async def _modelo_para_servidor(srv: Servidor) -> ModeloAvaliacao | None:
+        # Prioridade: cargo do servidor → fallback do período
+        mid = None
+        if srv.cargo_catalogo and srv.cargo_catalogo.modelo_avaliacao_id:
+            mid = srv.cargo_catalogo.modelo_avaliacao_id
+        elif periodo.modelo_avaliacao_id:
+            mid = periodo.modelo_avaliacao_id
+        if not mid:
+            return None
+        if mid not in modelos_cache:
+            m_result = await db.execute(
+                select(ModeloAvaliacao)
+                .options(selectinload(ModeloAvaliacao.funcoes_vinculadas).selectinload(ModeloAvaliacaoFuncao.funcao))
+                .where(ModeloAvaliacao.id == mid)
+            )
+            m = m_result.scalar_one_or_none()
+            if m:
+                modelos_cache[mid] = m
+        return modelos_cache.get(mid)
+
     criados = 0
+    pulados = 0
     formularios_criados = 0
     novos_formularios: list[FormularioAvaliacao] = []
     for servidor in servidores:
+        modelo_srv = await _modelo_para_servidor(servidor)
+        if not modelo_srv:
+            pulados += 1
+            continue
+
         existing = await db.execute(
             select(VinculoAvaliacao).where(
                 VinculoAvaliacao.periodo_avaliacao_id == periodo_id,
@@ -426,9 +539,7 @@ async def gerar_vinculos(
         vinculo_existente = existing.scalar_one_or_none()
         if vinculo_existente:
             novos = await _gerar_formularios_para_vinculo(
-                db,
-                vinculo=vinculo_existente,
-                modelo=modelo,
+                db, vinculo=vinculo_existente, modelo=modelo_srv,
             )
             formularios_criados += len(novos)
             novos_formularios.extend(novos)
@@ -437,16 +548,14 @@ async def gerar_vinculos(
         vinculo = VinculoAvaliacao(
             municipio_id=current_user.municipio_id,
             periodo_avaliacao_id=periodo_id,
-            modelo_avaliacao_id=periodo.modelo_avaliacao_id,
+            modelo_avaliacao_id=modelo_srv.id,
             servidor_avaliado_id=servidor.id,
             chefia_servidor_id=servidor.chefia_servidor_id,
         )
         db.add(vinculo)
         await db.flush()
         novos = await _gerar_formularios_para_vinculo(
-            db,
-            vinculo=vinculo,
-            modelo=modelo,
+            db, vinculo=vinculo, modelo=modelo_srv,
         )
         formularios_criados += len(novos)
         novos_formularios.extend(novos)
@@ -456,9 +565,10 @@ async def gerar_vinculos(
         await _notificar_formularios(db, periodo=periodo, formularios=novos_formularios)
 
     return {
-        "message": f"{criados} vínculos e {formularios_criados} formulários criados",
+        "message": f"{criados} vínculos e {formularios_criados} formulários criados" + (f" ({pulados} servidores sem cargo/questionário vinculado foram ignorados)" if pulados else ""),
         "total": criados,
         "formularios_criados": formularios_criados,
+        "pulados": pulados,
     }
 
 

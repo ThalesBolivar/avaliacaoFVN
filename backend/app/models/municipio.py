@@ -20,6 +20,7 @@ class Municipio(Base):
 
     usuarios: Mapped[List["Usuario"]] = relationship("Usuario", back_populates="municipio", foreign_keys="Usuario.municipio_id")
     servidores: Mapped[List["Servidor"]] = relationship("Servidor", back_populates="municipio")
+    funcoes_usuario: Mapped[List["FuncaoUsuario"]] = relationship("FuncaoUsuario", back_populates="municipio")
     modelos_avaliacao: Mapped[List["ModeloAvaliacao"]] = relationship("ModeloAvaliacao", back_populates="municipio")
     categorias_avaliacao: Mapped[List["CategoriaAvaliacao"]] = relationship("CategoriaAvaliacao", back_populates="municipio")
     periodos_avaliacao: Mapped[List["PeriodoAvaliacao"]] = relationship("PeriodoAvaliacao", back_populates="municipio")

@@ -5,7 +5,10 @@ import Login from '@/pages/Login'
 import Dashboard from '@/pages/Dashboard'
 import Municipios from '@/pages/Admin/Municipios'
 import Servidores from '@/pages/Admin/Servidores'
-import Usuarios from '@/pages/Admin/Usuarios'
+import Cargos from '@/pages/Admin/Cargos'
+import NiveisCargo from '@/pages/Admin/NiveisCargo'
+import Lotacoes from '@/pages/Admin/Lotacoes'
+import CadastroUsuarios from '@/pages/Admin/CadastroUsuarios'
 import Periodos from '@/pages/Admin/Periodos'
 import Questionarios from '@/pages/Admin/Questionarios'
 import CriarQuestionario from '@/pages/Admin/Questionarios/Criar'
@@ -14,7 +17,9 @@ import PreviewQuestionario from '@/pages/Admin/Questionarios/Preview'
 import Logs from '@/pages/Admin/Logs'
 import AvaliacoesPendentes from '@/pages/Avaliacoes/Pendentes'
 import MinhasAvaliacoes from '@/pages/Avaliacoes/MinhasAvaliacoes'
+import AvaliacoesRecebidas from '@/pages/Avaliacoes/Recebidas'
 import PreencherAvaliacao from '@/pages/Avaliacoes/Preencher'
+import MinhaSubcomissao from '@/pages/Avaliacoes/MinhaSubcomissao'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -35,7 +40,14 @@ export default function App() {
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/admin/municipios" element={<Municipios />} />
             <Route path="/admin/servidores" element={<Servidores />} />
-            <Route path="/admin/usuarios" element={<Usuarios />} />
+            <Route path="/admin/niveis-cargo" element={<NiveisCargo />} />
+            <Route path="/admin/lotacoes" element={<Lotacoes />} />
+            <Route path="/admin/cargos" element={<Cargos />} />
+            <Route path="/admin/cadastro-usuarios" element={<CadastroUsuarios />} />
+            {/* Rotas antigas redirecionam para o cadastro unificado */}
+            <Route path="/admin/usuarios" element={<Navigate to="/admin/cadastro-usuarios?etapa=usuarios" replace />} />
+            <Route path="/admin/funcoes-usuario" element={<Navigate to="/admin/cadastro-usuarios" replace />} />
+            <Route path="/admin/servidor-funcoes" element={<Navigate to="/admin/cadastro-usuarios?etapa=vinculos" replace />} />
             <Route path="/admin/periodos" element={<Periodos />} />
             <Route path="/admin/questionarios" element={<Questionarios />} />
             <Route path="/admin/questionarios/novo" element={<CriarQuestionario />} />
@@ -44,7 +56,9 @@ export default function App() {
             <Route path="/admin/logs" element={<Logs />} />
             <Route path="/avaliacoes/pendentes" element={<AvaliacoesPendentes />} />
             <Route path="/avaliacoes/minhas" element={<MinhasAvaliacoes />} />
+            <Route path="/avaliacoes/recebidas" element={<AvaliacoesRecebidas />} />
             <Route path="/avaliacoes/:id/preencher" element={<PreencherAvaliacao />} />
+            <Route path="/avaliacoes/subcomissao" element={<MinhaSubcomissao />} />
             <Route path="/" element={<Navigate to="/dashboard" replace />} />
           </Route>
           <Route path="*" element={<Navigate to="/dashboard" replace />} />

@@ -64,14 +64,18 @@ export default function PreviewQuestionario() {
                   <span className="w-7 h-7 rounded-full bg-blue-100 text-blue-700 text-xs font-bold flex items-center justify-center">
                     {pergunta.numero}
                   </span>
-                  <h2 className="font-semibold text-gray-800">{pergunta.criterio}</h2>
+                  <h2 className="font-semibold text-gray-800">{pergunta.texto}</h2>
                 </div>
-                <p className="text-gray-700">{pergunta.texto}</p>
               </div>
-              <div className="text-right text-xs text-gray-500 shrink-0">
-                <p>{pergunta.tipo}</p>
+              <div className="text-right shrink-0 space-y-2">
+                {pergunta.categoria && (
+                  <div className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-blue-700 shadow-sm">
+                    {pergunta.categoria}
+                  </div>
+                )}
+                <div className="text-xs text-gray-500">
                 <p>Peso {pergunta.peso}</p>
-                {pergunta.categoria && <p>{pergunta.categoria}</p>}
+                </div>
               </div>
             </div>
 

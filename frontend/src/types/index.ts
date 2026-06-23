@@ -44,12 +44,100 @@ export interface Servidor {
   cpf?: string
   matricula: string
   cargo?: string
-  lotacao?: string
+  cargo_id?: number
+  lotacao_id?: number
+  lotacao?: LotacaoEmbed
+  grau_instrucao?: string
   data_admissao?: string
   email?: string
-  telefone?: string
   ativo: boolean
   criado_em: string
+}
+
+export interface VincularServidorPayload {
+  municipio_id: number
+}
+
+// ── Lotação ──────────────────────────────────────────────────
+
+export interface Lotacao {
+  id: number
+  municipio_id: number
+  nome: string
+  descricao?: string
+  ordem: number
+  ativo: boolean
+  criado_em: string
+}
+
+export interface LotacaoEmbed {
+  id: number
+  nome: string
+}
+
+export interface LotacaoPayload {
+  nome: string
+  descricao?: string
+  ordem?: number
+  ativo?: boolean
+}
+
+// ── Nível de Cargo ───────────────────────────────────────────
+
+export interface NivelCargoItem {
+  id: number
+  nome: string
+  label: string
+  descricao?: string
+  ordem: number
+  ativo: boolean
+  criado_em: string
+}
+
+// ── Cargo ────────────────────────────────────────────────────
+
+export interface NivelCargoEmbed {
+  id: number
+  nome: string
+  label: string
+}
+
+export interface Cargo {
+  id: number
+  municipio_id: number
+  nome: string
+  nivel_id: number
+  nivel: NivelCargoEmbed
+  modelo_avaliacao_id?: number
+  pontuacao_maxima: number
+  pontos_min_estagio?: number
+  pontos_min_progressao?: number
+  ativo: boolean
+}
+
+export interface PesoQuestao {
+  numero_pergunta: number
+  peso: number
+}
+
+export interface CargoDetalhe extends Cargo {
+  pesos: PesoQuestao[]
+}
+
+export interface CargoPayload {
+  municipio_id?: number
+  nome: string
+  nivel_id: number
+  modelo_avaliacao_id?: number | null
+  pontuacao_maxima: number
+  pontos_min_estagio?: number | null
+  pontos_min_progressao?: number | null
+  ativo: boolean
+  pesos?: PesoQuestao[]
+}
+
+export interface ServidorFicha extends Servidor {
+  cargo_catalogo?: CargoDetalhe
 }
 
 // ── Questionários ────────────────────────────────────────────
@@ -92,6 +180,13 @@ export interface Pergunta {
   opcoes: Opcao[]
 }
 
+export interface FuncaoVinculada {
+  id: number
+  funcao_usuario_id: number
+  nome: string
+  perfil_base: string
+}
+
 export interface Modelo {
   id: number
   municipio_id: number
@@ -106,6 +201,8 @@ export interface Modelo {
   publicado_em?: string
   criado_em: string
   total_perguntas: number
+  funcao_ids: number[]
+  funcoes_vinculadas?: FuncaoVinculada[]
   perguntas?: Pergunta[]
 }
 
@@ -220,4 +317,64 @@ export interface DashboardServidor {
   total_avaliacoes: number
   pendentes: number
   finalizadas: number
+}
+
+// ── Dashboard Funcoes Progresso ───────────────────────────────
+
+export interface MembroSubcomissao {
+  servidor_id: number
+  nome: string
+  cargo?: string
+  matricula: string
+  lotacao?: string
+  papel: string
+}
+
+export type StatusGeralFuncao = 'PENDENTE' | 'EM_ANDAMENTO' | 'CONCLUIDO'
+
+export interface FuncaoProgresso {
+  id: number | 'autoavaliacao'
+  nome: string
+  perfil_base: string
+  total_servidores: number
+  realizadas: number
+  pendentes: number
+  em_andamento: number
+  percentual_conclusao: number
+  status_geral: StatusGeralFuncao
+  membros: MembroSubcomissao[]
+}
+
+export interface PeriodoDisponivel {
+  id: number
+  nome: string
+  status: string
+}
+
+export interface DashboardFuncoesProgresso {
+  periodo_id: number | null
+  periodo_nome: string | null
+  funcoes: FuncaoProgresso[]
+  periodos_disponiveis: PeriodoDisponivel[]
+}
+
+// ── Funções de Usuário ───────────────────────────────────────
+
+export interface UsuarioCompartilhadoInfo {
+  id: number
+  email: string
+  ativo: boolean
+}
+
+export interface FuncaoUsuario {
+  id: number
+  municipio_id: number
+  nome: string
+  perfil_base?: 'ADMINISTRADOR' | 'CHEFIA' | 'SUBCOMISSAO'
+  ativo: boolean
+  criado_em: string
+  /** Preenchido apenas para funções SUBCOMISSAO — usuário único compartilhado. */
+  usuario_compartilhado?: UsuarioCompartilhadoInfo
+  /** Retornado somente na criação de uma função SUBCOMISSAO. */
+  senha_gerada?: string
 }

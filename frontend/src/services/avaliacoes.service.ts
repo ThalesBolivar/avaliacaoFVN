@@ -21,6 +21,11 @@ export const avaliacoesService = {
     return response.data
   },
 
+  async recebidas(): Promise<FormularioResumo[]> {
+    const response = await api.get<FormularioResumo[]>('/avaliacoes/recebidas')
+    return response.data
+  },
+
   async pendentes(): Promise<FormularioResumo[]> {
     const response = await api.get<FormularioResumo[]>('/avaliacoes/pendentes')
     return response.data

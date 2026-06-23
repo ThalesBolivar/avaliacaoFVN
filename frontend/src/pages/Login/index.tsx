@@ -6,11 +6,11 @@ import { municipiosService } from '@/services/municipios.service'
 import { useMunicipioStore } from '@/store/municipio.store'
 import { useAuthStore } from '@/store/auth.store'
 import type { Municipio } from '@/types'
-import { Building2, Lock, Mail, Loader2 } from 'lucide-react'
+import { Building2, Lock, User, Loader2 } from 'lucide-react'
 
 const schema = z.object({
-  municipio_id: z.coerce.number().min(1, 'Selecione o município'),
-  email: z.string().email('E-mail inválido'),
+  municipio_id: z.union([z.coerce.number().min(1, 'Selecione o município'), z.literal(''), z.null()]).optional(),
+  login: z.string().min(1, 'Informe o login'),
   senha: z.string().min(1, 'Informe a senha'),
 })
 
@@ -26,7 +26,7 @@ export default function Login() {
   const [errors, setErrors] = useState<Partial<Record<keyof FormData, string>>>({})
   const [form, setForm] = useState({
     municipio_id: '',
-    email: '',
+    login: '',
     senha: '',
   })
 
@@ -38,16 +38,17 @@ export default function Login() {
     municipiosService.listar().then(setMunicipios).catch(console.error)
   }, [setMunicipios])
 
+  const isSuperAdminLogin = form.login.trim().toLowerCase() === 'superadmin@sistema.com'
+
   async function onSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
     setError('')
     setErrors({})
 
-    // Read directly from the form to avoid browser autofill desync issues.
     const formData = new FormData(event.currentTarget)
     const parsed = schema.safeParse({
       municipio_id: formData.get('municipio_id'),
-      email: String(formData.get('email') || '').trim(),
+      login: String(formData.get('login') || '').trim(),
       senha: String(formData.get('senha') || ''),
     })
 
@@ -55,15 +56,23 @@ export default function Login() {
       const fieldErrors = parsed.error.flatten().fieldErrors
       setErrors({
         municipio_id: fieldErrors.municipio_id?.[0],
-        email: fieldErrors.email?.[0],
+        login: fieldErrors.login?.[0],
         senha: fieldErrors.senha?.[0],
       })
       return
     }
 
+    const municipioIdValue = parsed.data.municipio_id
+    const municipioId = typeof municipioIdValue === 'number' ? municipioIdValue : null
+
+    if (!isSuperAdminLogin && !municipioId) {
+      setErrors({ municipio_id: 'Selecione o município' })
+      return
+    }
+
     setLoading(true)
     try {
-      await login(parsed.data.municipio_id, parsed.data.email, parsed.data.senha)
+      await login(isSuperAdminLogin ? null : municipioId, parsed.data.login, parsed.data.senha)
       navigate('/dashboard', { replace: true })
     } catch (err: unknown) {
       const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
@@ -89,7 +98,9 @@ export default function Login() {
 
           <form onSubmit={onSubmit} className="space-y-4" noValidate>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Município</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Município {isSuperAdminLogin ? '(opcional para super admin)' : ''}
+              </label>
               <div className="relative">
                 <Building2 size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
                 <select
@@ -98,9 +109,9 @@ export default function Login() {
                   onChange={(e) => setForm((current) => ({ ...current, municipio_id: e.target.value }))}
                   className="w-full pl-9 pr-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white text-gray-800"
                 >
-                  <option value="">Selecione o município</option>
+                  <option value="">{isSuperAdminLogin ? 'Super admin não precisa selecionar' : 'Selecione o município'}</option>
                   {municipios.map((m: Municipio) => (
-                    <option key={m.id} value={m.id}>{m.nome} — {m.estado}</option>
+                    <option key={m.id} value={m.id}>{m.nome} - {m.estado}</option>
                   ))}
                 </select>
               </div>
@@ -110,21 +121,21 @@ export default function Login() {
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">E-mail</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Login</label>
               <div className="relative">
-                <Mail size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                <User size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
                 <input
-                  name="email"
-                  type="email"
-                  value={form.email}
-                  onChange={(e) => setForm((current) => ({ ...current, email: e.target.value }))}
-                  placeholder="seu@email.com"
+                  name="login"
+                  type="text"
+                  value={form.login}
+                  onChange={(e) => setForm((current) => ({ ...current, login: e.target.value }))}
+                  placeholder="E-mail ou matrícula"
                   autoComplete="username"
                   className="w-full pl-9 pr-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
               </div>
-              {errors.email && (
-                <p className="text-red-500 text-xs mt-1">{errors.email}</p>
+              {errors.login && (
+                <p className="text-red-500 text-xs mt-1">{errors.login}</p>
               )}
             </div>
 
@@ -137,7 +148,7 @@ export default function Login() {
                   type="password"
                   value={form.senha}
                   onChange={(e) => setForm((current) => ({ ...current, senha: e.target.value }))}
-                  placeholder="••••••••"
+                  placeholder="Digite sua senha"
                   autoComplete="current-password"
                   className="w-full pl-9 pr-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
@@ -145,6 +156,10 @@ export default function Login() {
               {errors.senha && (
                 <p className="text-red-500 text-xs mt-1">{errors.senha}</p>
               )}
+            </div>
+
+            <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-700">
+              Super admin pode entrar só com login e senha. Servidores podem usar a matrícula como login e senha inicial.
             </div>
 
             {error && (

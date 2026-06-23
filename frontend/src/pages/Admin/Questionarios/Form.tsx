@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import api from '@/services/api'
 import { questionariosService, type ModeloPayload, type PerguntaPayload } from '@/services/questionarios.service'
-import type { Categoria, Modelo, Pergunta, TipoResposta } from '@/types'
+import type { Categoria, FuncaoUsuario, Modelo, Pergunta, TipoResposta } from '@/types'
+import { useAuthStore } from '@/store/auth.store'
 import {
   ArrowLeft, Plus, Trash2, GripVertical, ChevronDown, ChevronUp, Loader2, Save,
 } from 'lucide-react'
@@ -192,15 +194,13 @@ function buildModeloPayload({
   nome,
   descricao,
   paraAuto,
-  paraSuperior,
-  paraSub,
+  funcaoIds,
   perguntas,
 }: {
   nome: string
   descricao: string
   paraAuto: boolean
-  paraSuperior: boolean
-  paraSub: boolean
+  funcaoIds: number[]
   perguntas: Pergunta[]
 }): ModeloPayload {
   const perguntasPreenchidas = getPerguntasPreenchidas(perguntas)
@@ -208,8 +208,7 @@ function buildModeloPayload({
     nome: nome.trim(),
     descricao: descricao.trim() || undefined,
     para_autoavaliacao: paraAuto,
-    para_superior_imediato: paraSuperior,
-    para_subcomissao: paraSub,
+    funcao_ids: funcaoIds,
     perguntas: perguntasPreenchidas.map(buildPerguntaPayload),
   }
 }
@@ -228,15 +227,24 @@ export default function QuestionarioForm({
   const [nome, setNome] = useState('')
   const [descricao, setDescricao] = useState('')
   const [paraAuto, setParaAuto] = useState(true)
-  const [paraSuperior, setParaSuperior] = useState(true)
-  const [paraSub, setParaSub] = useState(true)
+  const [funcaoIdsSelecionados, setFuncaoIdsSelecionados] = useState<number[]>([])
   const [perguntas, setPerguntas] = useState<Pergunta[]>([])
   const [saving, setSaving] = useState(false)
   const [loadingInitial, setLoadingInitial] = useState(isEdit)
 
+  const { user } = useAuthStore()
+
   const { data: categorias = [] } = useQuery({
     queryKey: ['categorias'],
     queryFn: questionariosService.listarCategorias,
+  })
+
+  const { data: funcoes = [] } = useQuery<FuncaoUsuario[]>({
+    queryKey: ['funcoes-usuario-form', user?.municipio_id],
+    queryFn: async () => {
+      const mid = user?.municipio_id
+      return (await api.get(`/funcoes-usuario?ativo=true${mid ? `&municipio_id=${mid}` : ''}`)).data
+    },
   })
 
   const criarMutation = useMutation({
@@ -260,8 +268,7 @@ export default function QuestionarioForm({
         setNome(modelo.nome)
         setDescricao(modelo.descricao || '')
         setParaAuto(modelo.para_autoavaliacao)
-        setParaSuperior(modelo.para_superior_imediato)
-        setParaSub(modelo.para_subcomissao)
+        setFuncaoIdsSelecionados((modelo as any).funcao_ids ?? [])
         setPerguntas(normalizePerguntas(modelo.perguntas))
       })
       .catch((error) => {
@@ -371,8 +378,7 @@ export default function QuestionarioForm({
         nome,
         descricao,
         paraAuto,
-        paraSuperior,
-        paraSub,
+        funcaoIds: funcaoIdsSelecionados,
         perguntas,
       })
 
@@ -438,21 +444,36 @@ export default function QuestionarioForm({
         <div>
           <p className="text-sm font-medium text-gray-700 mb-2">Aplicar para:</p>
           <div className="flex gap-4 flex-wrap">
-            {[
-              { label: 'Autoavaliação', val: paraAuto, set: setParaAuto },
-              { label: 'Superior Imediato', val: paraSuperior, set: setParaSuperior },
-              { label: 'Subcomissão', val: paraSub, set: setParaSub },
-            ].map(({ label, val, set }) => (
-              <label key={label} className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={val}
-                  onChange={(e) => set(e.target.checked)}
-                  className="w-4 h-4 text-blue-600 rounded"
-                />
-                <span className="text-sm text-gray-700">{label}</span>
-              </label>
-            ))}
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={paraAuto}
+                onChange={(e) => setParaAuto(e.target.checked)}
+                className="w-4 h-4 text-blue-600 rounded"
+              />
+              <span className="text-sm text-gray-700">Autoavaliação</span>
+            </label>
+            {funcoes.length === 0 ? (
+              <p className="text-xs text-amber-600 self-center">
+                Nenhuma função cadastrada — cadastre em Cadastro de Usuários → Funções.
+              </p>
+            ) : (
+              funcoes.map((f) => (
+                <label key={f.id} className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={funcaoIdsSelecionados.includes(f.id)}
+                    onChange={(e) => {
+                      setFuncaoIdsSelecionados((prev) =>
+                        e.target.checked ? [...prev, f.id] : prev.filter((id) => id !== f.id)
+                      )
+                    }}
+                    className="w-4 h-4 text-blue-600 rounded"
+                  />
+                  <span className="text-sm text-gray-700">{f.nome}</span>
+                </label>
+              ))
+            )}
           </div>
         </div>
       </div>

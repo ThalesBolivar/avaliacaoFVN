@@ -20,6 +20,7 @@ class Usuario(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     municipio_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("municipios.id"), nullable=False)
     servidor_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("servidores.id"), nullable=True)
+    funcao_usuario_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("funcoes_usuario.id"), nullable=True)
     nome: Mapped[str] = mapped_column(String(150), nullable=False)
     email: Mapped[str] = mapped_column(String(150), nullable=False)
     senha_hash: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -33,3 +34,4 @@ class Usuario(Base):
 
     municipio: Mapped["Municipio"] = relationship("Municipio", back_populates="usuarios", foreign_keys=[municipio_id])
     servidor: Mapped[Optional["Servidor"]] = relationship("Servidor", foreign_keys=[servidor_id])
+    funcao_usuario: Mapped[Optional["FuncaoUsuario"]] = relationship("FuncaoUsuario", back_populates="usuarios", foreign_keys=[funcao_usuario_id])

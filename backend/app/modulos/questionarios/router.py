@@ -8,6 +8,13 @@ from typing import List
 from app.database import get_db
 from app.core.deps import get_current_user, require_admin
 from app.core.audit import log_event, Acoes
+from datetime import date as date_type
+from app.models.cargo import Cargo
+from app.models.funcao_usuario import FuncaoUsuario
+from app.models.modelo_avaliacao_funcao import ModeloAvaliacaoFuncao
+from app.models.periodo import PeriodoAvaliacao, VinculoAvaliacao, FormularioAvaliacao, StatusPeriodoEnum, StatusVinculoEnum
+from app.models.servidor import Servidor
+from app.models.servidor_funcao import ServidorFuncao
 from app.models.questionario import (
     ModeloAvaliacao, PerguntaAvaliacao, OpcaoPerguntaAvaliacao,
     CategoriaAvaliacao, StatusModeloEnum,
@@ -15,12 +22,129 @@ from app.models.questionario import (
 from app.models.usuario import Usuario, PerfilEnum
 from app.schemas.questionario import (
     ModeloCreate, ModeloUpdate, ModeloResumo, ModeloResponse,
+    FuncaoVinculadaResponse,
     PerguntaCreate, PerguntaUpdate, PerguntaResponse, PerguntaReordenar,
     OpcaoCreate, OpcaoUpdate, OpcaoResponse,
     CategoriaCreate, CategoriaUpdate, CategoriaResponse,
 )
 
+
+async def _auto_gerar_avaliacoes(
+    db: AsyncSession,
+    modelo: ModeloAvaliacao,
+    municipio_id: int,
+) -> tuple[PeriodoAvaliacao, int]:
+    """Cria um período oculto e gera todos os formulários ao publicar o questionário."""
+    from app.modulos.periodos.router import _gerar_formularios_para_vinculo
+
+    # Cria o período automático vinculado ao modelo
+    periodo = PeriodoAvaliacao(
+        municipio_id=municipio_id,
+        nome=modelo.nome,
+        data_inicio=date_type.today(),
+        data_fim=date_type(2099, 12, 31),
+        modelo_avaliacao_id=modelo.id,
+        status=StatusPeriodoEnum.ATIVO,
+    )
+    db.add(periodo)
+    await db.flush()
+
+    # Busca servidores cujo cargo aponta para este modelo
+    servidores_result = await db.execute(
+        select(Servidor)
+        .join(Cargo, Cargo.id == Servidor.cargo_id)
+        .where(
+            Servidor.municipio_id == municipio_id,
+            Servidor.ativo == True,
+            Cargo.modelo_avaliacao_id == modelo.id,
+        )
+    )
+    servidores = servidores_result.scalars().all()
+
+    formularios_criados = 0
+    for servidor in servidores:
+        vinculo = VinculoAvaliacao(
+            municipio_id=municipio_id,
+            periodo_avaliacao_id=periodo.id,
+            modelo_avaliacao_id=modelo.id,
+            servidor_avaliado_id=servidor.id,
+            chefia_servidor_id=servidor.chefia_servidor_id,
+        )
+        db.add(vinculo)
+        await db.flush()
+
+        novos = await _gerar_formularios_para_vinculo(db, vinculo=vinculo, modelo=modelo)
+        formularios_criados += len(novos)
+
+    return periodo, formularios_criados
+
+
+def _fv_list(modelo: ModeloAvaliacao) -> list[dict]:
+    return [
+        {"id": fv.id, "funcao_usuario_id": fv.funcao_usuario_id, "nome": fv.funcao.nome, "perfil_base": fv.funcao.perfil_base}
+        for fv in modelo.funcoes_vinculadas
+    ]
+
+
+def _build_modelo_response(modelo: ModeloAvaliacao, total_perguntas: int = 0) -> ModeloResponse:
+    fv = _fv_list(modelo)
+    return ModeloResponse(
+        id=modelo.id, municipio_id=modelo.municipio_id, nome=modelo.nome,
+        descricao=modelo.descricao, versao=modelo.versao, status=modelo.status,
+        para_autoavaliacao=modelo.para_autoavaliacao,
+        para_superior_imediato=modelo.para_superior_imediato,
+        para_subcomissao=modelo.para_subcomissao,
+        pontuacao_maxima=modelo.pontuacao_maxima, publicado_em=modelo.publicado_em,
+        criado_em=modelo.criado_em, total_perguntas=total_perguntas,
+        funcao_ids=[f["funcao_usuario_id"] for f in fv],
+        funcoes_vinculadas=fv,
+        perguntas=[
+            PerguntaResponse.model_validate(p)
+            for p in (modelo.perguntas or [])
+        ],
+    )
+
 router = APIRouter(prefix="/admin", tags=["Questionários"])
+
+
+async def _sincronizar_funcoes_modelo(
+    db: AsyncSession,
+    modelo: ModeloAvaliacao,
+    funcao_ids: list[int],
+    municipio_id: int,
+) -> None:
+    """Substitui as funções vinculadas ao modelo pelo novo conjunto de funcao_ids."""
+    # Valida que todas as funções pertencem ao município
+    if funcao_ids:
+        result = await db.execute(
+            select(FuncaoUsuario).where(
+                FuncaoUsuario.id.in_(funcao_ids),
+                FuncaoUsuario.municipio_id == municipio_id,
+            )
+        )
+        encontradas = {f.id for f in result.scalars().all()}
+        invalidas = set(funcao_ids) - encontradas
+        if invalidas:
+            raise HTTPException(status_code=400, detail=f"Funções não encontradas: {invalidas}")
+
+    # Remove todos os vínculos existentes
+    for vf in list(modelo.funcoes_vinculadas):
+        await db.delete(vf)
+    await db.flush()
+
+    # Cria os novos vínculos
+    for fid in funcao_ids:
+        db.add(ModeloAvaliacaoFuncao(modelo_avaliacao_id=modelo.id, funcao_usuario_id=fid))
+
+    # Atualiza os flags booleanos derivados (compatibilidade)
+    result = await db.execute(
+        select(FuncaoUsuario).where(FuncaoUsuario.id.in_(funcao_ids))
+    ) if funcao_ids else None
+    perfis = {f.perfil_base for f in (result.scalars().all() if result else [])}
+    modelo.para_superior_imediato = "CHEFIA" in perfis
+    modelo.para_subcomissao = "SUBCOMISSAO" in perfis
+
+    await db.flush()
 
 
 async def _criar_perguntas_modelo(
@@ -139,6 +263,7 @@ async def listar_modelos(
 ):
     result = await db.execute(
         select(ModeloAvaliacao)
+        .options(selectinload(ModeloAvaliacao.funcoes_vinculadas).selectinload(ModeloAvaliacaoFuncao.funcao))
         .where(ModeloAvaliacao.municipio_id == current_user.municipio_id)
         .order_by(ModeloAvaliacao.criado_em.desc())
     )
@@ -153,8 +278,19 @@ async def listar_modelos(
             )
         )
         total = count_result.scalar() or 0
-        item = ModeloResumo.model_validate(m)
-        item.total_perguntas = total
+        fv_list = [
+            {"id": fv.id, "funcao_usuario_id": fv.funcao_usuario_id, "nome": fv.funcao.nome, "perfil_base": fv.funcao.perfil_base}
+            for fv in m.funcoes_vinculadas
+        ]
+        item = ModeloResumo(
+            id=m.id, municipio_id=m.municipio_id, nome=m.nome, versao=m.versao,
+            status=m.status, para_autoavaliacao=m.para_autoavaliacao,
+            para_superior_imediato=m.para_superior_imediato, para_subcomissao=m.para_subcomissao,
+            pontuacao_maxima=m.pontuacao_maxima, publicado_em=m.publicado_em, criado_em=m.criado_em,
+            total_perguntas=total,
+            funcao_ids=[fv["funcao_usuario_id"] for fv in fv_list],
+            funcoes_vinculadas=fv_list,
+        )
         items.append(item)
 
     return items
@@ -166,7 +302,7 @@ async def criar_modelo(
     db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(require_admin),
 ):
-    payload = data.model_dump(exclude={"perguntas"})
+    payload = data.model_dump(exclude={"perguntas", "funcao_ids"})
     modelo = ModeloAvaliacao(
         municipio_id=current_user.municipio_id,
         criado_por_id=current_user.id,
@@ -174,6 +310,9 @@ async def criar_modelo(
     )
     db.add(modelo)
     await db.flush()
+
+    if data.funcao_ids:
+        await _sincronizar_funcoes_modelo(db, modelo, data.funcao_ids, current_user.municipio_id)
 
     if data.perguntas:
         await _criar_perguntas_modelo(modelo.id, data.perguntas, db)
@@ -188,10 +327,14 @@ async def criar_modelo(
 
     result = await db.execute(
         select(ModeloAvaliacao)
-        .options(selectinload(ModeloAvaliacao.perguntas).selectinload(PerguntaAvaliacao.opcoes))
+        .options(
+            selectinload(ModeloAvaliacao.perguntas).selectinload(PerguntaAvaliacao.opcoes),
+            selectinload(ModeloAvaliacao.funcoes_vinculadas).selectinload(ModeloAvaliacaoFuncao.funcao),
+        )
         .where(ModeloAvaliacao.id == modelo.id)
     )
-    return result.scalar_one()
+    m = result.scalar_one()
+    return _build_modelo_response(m)
 
 
 @router.get("/questionarios/{modelo_id}", response_model=ModeloResponse)
@@ -203,8 +346,8 @@ async def detalhar_modelo(
     result = await db.execute(
         select(ModeloAvaliacao)
         .options(
-            selectinload(ModeloAvaliacao.perguntas)
-            .selectinload(PerguntaAvaliacao.opcoes)
+            selectinload(ModeloAvaliacao.perguntas).selectinload(PerguntaAvaliacao.opcoes),
+            selectinload(ModeloAvaliacao.funcoes_vinculadas).selectinload(ModeloAvaliacaoFuncao.funcao),
         )
         .where(
             ModeloAvaliacao.id == modelo_id,
@@ -221,9 +364,8 @@ async def detalhar_modelo(
             PerguntaAvaliacao.ativa == True,
         )
     )
-    resp = ModeloResponse.model_validate(modelo)
-    resp.total_perguntas = count_result.scalar() or 0
-    return resp
+    total = count_result.scalar() or 0
+    return _build_modelo_response(modelo, total)
 
 
 @router.put("/questionarios/{modelo_id}", response_model=ModeloResponse)
@@ -246,9 +388,18 @@ async def atualizar_modelo(
     if modelo.status != StatusModeloEnum.RASCUNHO:
         raise HTTPException(status_code=400, detail="Apenas questionários em RASCUNHO podem ser editados")
 
-    update_data = data.model_dump(exclude_none=True, exclude={"perguntas"})
+    update_data = data.model_dump(exclude_none=True, exclude={"perguntas", "funcao_ids"})
     for field, value in update_data.items():
         setattr(modelo, field, value)
+
+    if data.funcao_ids is not None:
+        loaded_m = await db.execute(
+            select(ModeloAvaliacao)
+            .options(selectinload(ModeloAvaliacao.funcoes_vinculadas))
+            .where(ModeloAvaliacao.id == modelo_id)
+        )
+        modelo_com_funcoes = loaded_m.scalar_one()
+        await _sincronizar_funcoes_modelo(db, modelo_com_funcoes, data.funcao_ids, current_user.municipio_id)
 
     if data.perguntas is not None:
         loaded = await db.execute(
@@ -271,10 +422,14 @@ async def atualizar_modelo(
 
     full = await db.execute(
         select(ModeloAvaliacao)
-        .options(selectinload(ModeloAvaliacao.perguntas).selectinload(PerguntaAvaliacao.opcoes))
+        .options(
+            selectinload(ModeloAvaliacao.perguntas).selectinload(PerguntaAvaliacao.opcoes),
+            selectinload(ModeloAvaliacao.funcoes_vinculadas).selectinload(ModeloAvaliacaoFuncao.funcao),
+        )
         .where(ModeloAvaliacao.id == modelo_id)
     )
-    return full.scalar_one()
+    m = full.scalar_one()
+    return _build_modelo_response(m)
 
 
 @router.post("/questionarios/{modelo_id}/publicar", response_model=ModeloResumo)
@@ -302,7 +457,8 @@ async def publicar_modelo(
             PerguntaAvaliacao.ativa == True,
         )
     )
-    if (count.scalar() or 0) == 0:
+    total_perguntas = count.scalar() or 0
+    if total_perguntas == 0:
         raise HTTPException(status_code=400, detail="O questionário precisa ter ao menos uma pergunta")
 
     pontuacao = await db.execute(
@@ -322,17 +478,115 @@ async def publicar_modelo(
     modelo.status = StatusModeloEnum.PUBLICADO
     modelo.publicado_em = datetime.now(timezone.utc)
     modelo.pontuacao_maxima = pontuacao.scalar()
+    await db.flush()
+
+    # Carrega funcoes_vinculadas para geração
+    m_full = await db.execute(
+        select(ModeloAvaliacao)
+        .options(selectinload(ModeloAvaliacao.funcoes_vinculadas).selectinload(ModeloAvaliacaoFuncao.funcao))
+        .where(ModeloAvaliacao.id == modelo_id)
+    )
+    modelo_com_funcoes = m_full.scalar_one()
+
+    _, formularios = await _auto_gerar_avaliacoes(db, modelo_com_funcoes, current_user.municipio_id)
 
     await log_event(
         db, current_user.municipio_id, Acoes.QUESTIONARIO_PUBLICADO, "questionario",
         usuario=current_user, entidade_id=str(modelo_id),
-        descricao=f"Questionário '{modelo.nome}' v{modelo.versao} publicado",
+        descricao=f"Questionário '{modelo.nome}' v{modelo.versao} publicado — {formularios} formulários gerados",
     )
 
     await db.flush()
-    await db.refresh(modelo)
-    resp = ModeloResumo.model_validate(modelo)
-    return resp
+
+    m_pub = await db.execute(
+        select(ModeloAvaliacao)
+        .options(selectinload(ModeloAvaliacao.funcoes_vinculadas).selectinload(ModeloAvaliacaoFuncao.funcao))
+        .where(ModeloAvaliacao.id == modelo_id)
+    )
+    m = m_pub.scalar_one()
+    fv = _fv_list(m)
+    return ModeloResumo(
+        id=m.id, municipio_id=m.municipio_id, nome=m.nome, versao=m.versao,
+        status=m.status, para_autoavaliacao=m.para_autoavaliacao,
+        para_superior_imediato=m.para_superior_imediato, para_subcomissao=m.para_subcomissao,
+        pontuacao_maxima=m.pontuacao_maxima, publicado_em=m.publicado_em, criado_em=m.criado_em,
+        total_perguntas=total_perguntas,
+        funcao_ids=[f["funcao_usuario_id"] for f in fv],
+        funcoes_vinculadas=fv,
+    )
+
+
+@router.post("/questionarios/{modelo_id}/arquivar", response_model=ModeloResumo)
+async def arquivar_modelo(
+    modelo_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: Usuario = Depends(require_admin),
+):
+    """Arquiva o questionário e cancela todos os formulários pendentes vinculados a ele."""
+    result = await db.execute(
+        select(ModeloAvaliacao).where(
+            ModeloAvaliacao.id == modelo_id,
+            ModeloAvaliacao.municipio_id == current_user.municipio_id,
+        )
+    )
+    modelo = result.scalar_one_or_none()
+    if not modelo:
+        raise HTTPException(status_code=404, detail="Questionário não encontrado")
+
+    if modelo.status != StatusModeloEnum.PUBLICADO:
+        raise HTTPException(status_code=400, detail="Apenas questionários PUBLICADOS podem ser arquivados")
+
+    modelo.status = StatusModeloEnum.ARQUIVADO
+
+    # Encerra períodos ativos deste modelo
+    periodos_result = await db.execute(
+        select(PeriodoAvaliacao).where(
+            PeriodoAvaliacao.modelo_avaliacao_id == modelo_id,
+            PeriodoAvaliacao.municipio_id == current_user.municipio_id,
+            PeriodoAvaliacao.status == StatusPeriodoEnum.ATIVO,
+        )
+    )
+    for periodo in periodos_result.scalars().all():
+        periodo.status = StatusPeriodoEnum.ENCERRADO
+
+    # Cancela formulários pendentes/em andamento vinculados a este modelo
+    forms_result = await db.execute(
+        select(FormularioAvaliacao)
+        .join(VinculoAvaliacao, VinculoAvaliacao.id == FormularioAvaliacao.vinculo_avaliacao_id)
+        .where(
+            VinculoAvaliacao.modelo_avaliacao_id == modelo_id,
+            FormularioAvaliacao.municipio_id == current_user.municipio_id,
+            FormularioAvaliacao.status.in_([StatusVinculoEnum.PENDENTE, StatusVinculoEnum.EM_ANDAMENTO]),
+            FormularioAvaliacao.ativo == "S",
+        )
+    )
+    cancelados = 0
+    for form in forms_result.scalars().all():
+        form.status = StatusVinculoEnum.CANCELADA
+        form.ativo = "N"
+        cancelados += 1
+
+    await log_event(
+        db, current_user.municipio_id, Acoes.QUESTIONARIO_ALTERADO, "questionario",
+        usuario=current_user, entidade_id=str(modelo_id),
+        descricao=f"Questionário '{modelo.nome}' arquivado — {cancelados} formulários cancelados",
+    )
+    await db.flush()
+
+    m_pub = await db.execute(
+        select(ModeloAvaliacao)
+        .options(selectinload(ModeloAvaliacao.funcoes_vinculadas).selectinload(ModeloAvaliacaoFuncao.funcao))
+        .where(ModeloAvaliacao.id == modelo_id)
+    )
+    m = m_pub.scalar_one()
+    fv = _fv_list(m)
+    return ModeloResumo(
+        id=m.id, municipio_id=m.municipio_id, nome=m.nome, versao=m.versao,
+        status=m.status, para_autoavaliacao=m.para_autoavaliacao,
+        para_superior_imediato=m.para_superior_imediato, para_subcomissao=m.para_subcomissao,
+        pontuacao_maxima=m.pontuacao_maxima, publicado_em=m.publicado_em, criado_em=m.criado_em,
+        total_perguntas=0, funcao_ids=[f["funcao_usuario_id"] for f in fv], funcoes_vinculadas=fv,
+    )
 
 
 @router.post("/questionarios/{modelo_id}/clonar", response_model=ModeloResponse, status_code=201)
@@ -405,12 +659,13 @@ async def clonar_modelo(
 
     full = await db.execute(
         select(ModeloAvaliacao)
-        .options(selectinload(ModeloAvaliacao.perguntas).selectinload(PerguntaAvaliacao.opcoes))
+        .options(
+            selectinload(ModeloAvaliacao.perguntas).selectinload(PerguntaAvaliacao.opcoes),
+            selectinload(ModeloAvaliacao.funcoes_vinculadas).selectinload(ModeloAvaliacaoFuncao.funcao),
+        )
         .where(ModeloAvaliacao.id == clone.id)
     )
-    resp = ModeloResponse.model_validate(full.scalar_one())
-    resp.total_perguntas = len([p for p in clone.perguntas if p.ativa])
-    return resp
+    return _build_modelo_response(full.scalar_one())
 
 
 @router.get("/questionarios/{modelo_id}/preview")

@@ -67,6 +67,9 @@ class ModeloAvaliacao(Base):
         order_by="PerguntaAvaliacao.numero_pergunta"
     )
     periodos: Mapped[List["PeriodoAvaliacao"]] = relationship("PeriodoAvaliacao", back_populates="modelo_avaliacao")
+    funcoes_vinculadas: Mapped[List["ModeloAvaliacaoFuncao"]] = relationship(
+        "ModeloAvaliacaoFuncao", back_populates="modelo", cascade="all, delete-orphan"
+    )
 
 
 class PerguntaAvaliacao(Base):

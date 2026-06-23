@@ -76,7 +76,6 @@ class FormularioAvaliacao(Base):
     ativo: Mapped[str] = mapped_column(String(1), nullable=False, default="S", server_default="S")
     observacoes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     sugestoes_melhoria: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    uso_alcool_drogas: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     pontuacao_total: Mapped[Optional[float]] = mapped_column(Numeric(8, 2), nullable=True)
     iniciado_em: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     finalizado_em: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)

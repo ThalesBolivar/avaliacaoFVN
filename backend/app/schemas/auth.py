@@ -3,8 +3,8 @@ from app.models.usuario import PerfilEnum
 
 
 class LoginRequest(BaseModel):
-    municipio_id: int
-    email: EmailStr
+    municipio_id: int | None = None
+    login: str
     senha: str
 
 

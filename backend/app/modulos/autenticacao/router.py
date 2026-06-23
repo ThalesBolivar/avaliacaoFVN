@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update
+from sqlalchemy import select, update, or_
 from datetime import datetime, timezone
 from jose import JWTError
 
@@ -13,7 +13,7 @@ from app.core.security import (
 from app.core.deps import get_current_user, get_client_ip
 from app.core.audit import log_event, Acoes
 from app.models.usuario import Usuario, PerfilEnum
-from app.models.municipio import Municipio
+from app.models.servidor import Servidor
 from app.schemas.auth import LoginRequest, TokenResponse, RefreshRequest, MeResponse
 
 router = APIRouter(prefix="/auth", tags=["Autenticação"])
@@ -26,23 +26,45 @@ async def login(
     db: AsyncSession = Depends(get_db),
 ):
     ip = get_client_ip(request)
+    login_informado = data.login.strip()
+    login_normalizado = login_informado.lower()
+    municipio_id_log = data.municipio_id or 0
 
-    result = await db.execute(
-        select(Usuario).where(
-            Usuario.email == data.email,
-            Usuario.municipio_id == data.municipio_id,
+    if data.municipio_id is None:
+        result = await db.execute(
+            select(Usuario).where(
+                Usuario.email == login_normalizado,
+                Usuario.perfil == PerfilEnum.SUPER_ADMIN,
+            )
         )
-    )
+    else:
+        result = await db.execute(
+            select(Usuario)
+            .outerjoin(Servidor, Servidor.usuario_id == Usuario.id)
+            .where(
+                Usuario.municipio_id == data.municipio_id,
+                or_(
+                    Usuario.email == login_normalizado,
+                    Servidor.matricula == login_informado,
+                ),
+            )
+        )
     user = result.scalar_one_or_none()
 
     if not user or not verify_password(data.senha, user.senha_hash):
         await log_event(
-            db, data.municipio_id, Acoes.LOGIN_INVALIDO, "usuario",
-            descricao=f"Login inválido para {data.email}", endereco_ip=ip,
+            db, municipio_id_log, Acoes.LOGIN_INVALIDO, "usuario",
+            descricao=f"Login inválido para {data.login}", endereco_ip=ip,
         )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Email ou senha incorretos",
+            detail="Login ou senha incorretos",
+        )
+
+    if data.municipio_id is None and user.perfil != PerfilEnum.SUPER_ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Selecione o município para este tipo de usuário",
         )
 
     if not user.ativo:

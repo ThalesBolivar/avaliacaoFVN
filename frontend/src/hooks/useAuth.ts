@@ -6,8 +6,8 @@ export function useAuth() {
   const { user, isAuthenticated, logout: storeLogout, setAuth, setTokens, refreshToken, hasPermission } = useAuthStore()
   const navigate = useNavigate()
 
-  async function login(municipio_id: number, email: string, senha: string) {
-    const data = await authService.login(municipio_id, email, senha)
+  async function login(municipio_id: number | null, login: string, senha: string) {
+    const data = await authService.login(municipio_id, login, senha)
     setTokens(data.access_token, data.refresh_token)
     const me = await authService.me()
     setAuth(me, data.access_token, data.refresh_token)
